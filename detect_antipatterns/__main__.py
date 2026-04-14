@@ -756,6 +756,12 @@ def detect_dead_code(
 
     for name, lineno in imported_names.items():
         if name not in referenced_names and not name.startswith("_"):
+            # Skip imports that already have a # noqa comment (e.g., F401
+            # for intentional re-exports)
+            if lineno <= len(lines) and re.search(
+                r"#\s*noqa\b", lines[lineno - 1]
+            ):
+                continue
             # Count how many imported names share this line number
             names_on_line = [
                 n for n, ln in imported_names.items() if ln == lineno
@@ -885,12 +891,37 @@ def detect_stray_prints(
             ):
                 return
 
+    # Build child → parent map so we can check enclosing context
+    _parents: Dict[int, ast.AST] = {}
+    for parent_node in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent_node):
+            _parents[id(child)] = parent_node
+
+    def _is_inside_verbose_guard(n: ast.AST) -> bool:
+        """Walk up the parent chain looking for `if verbose` / `if self._verbose`."""
+        cur = n
+        while id(cur) in _parents:
+            p = _parents[id(cur)]
+            if isinstance(p, ast.If):
+                test = p.test
+                if isinstance(test, ast.Name) and "verbose" in test.id.lower():
+                    return True
+                if (
+                    isinstance(test, ast.Attribute)
+                    and "verbose" in test.attr.lower()
+                ):
+                    return True
+            cur = p
+        return False
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
 
         # print() / pprint()
         if isinstance(node.func, ast.Name) and node.func.id in _STRAY_PRINT_FUNCS:
+            if _is_inside_verbose_guard(node):
+                continue
             # Only fixable if the print is a standalone Expr statement
             # (not embedded in an assignment or return)
             # Walk up: find the parent Expr statement
