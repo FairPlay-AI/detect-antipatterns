@@ -53,6 +53,41 @@ SUGGESTABLE_SUBTYPES = {
     "wrap-then-unwrap",
 }
 
+# noqa codes: use `# noqa: DAP001` to suppress a specific finding.
+# `# noqa: DAP` suppresses all detect-antipatterns findings on that line.
+# Codes map to subtype prefixes so multiple subtypes under one detector
+# share a code.
+_SUBTYPE_TO_CODE: Dict[str, str] = {
+    # DAP001 — thin shims
+    "pure-rename": "DAP001",
+    "arg-reshaper": "DAP001",
+    "config-unpacker": "DAP001",
+    # DAP002 — phantom guards
+    "epsilon-guard": "DAP002",
+    "broad-except-swallowed": "DAP002",
+    "redundant-none-check": "DAP002",
+    "redundant-isinstance": "DAP002",
+    # DAP003 — unnecessary indirection
+    # (config-unpacker also appears here; indirection detector uses same subtype)
+    "single-method-proxy": "DAP003",
+    # DAP004 — over-commenting
+    "trivial-comment": "DAP004",
+    "over-commented-file": "DAP004",
+    # DAP005 — single-use helpers
+    "single-use-helper": "DAP005",
+    # DAP006 — dead code
+    "unused-import": "DAP006",
+    "assigned-never-read": "DAP006",
+    # DAP007 — stray prints
+    "stray-print": "DAP007",
+    "debug-logging": "DAP007",
+    # DAP008 — write-then-discard
+    "immediate-overwrite": "DAP008",
+    "wrap-then-unwrap": "DAP008",
+}
+
+_NOQA_RE = re.compile(r"#\s*noqa\b(?::?\s*([A-Z0-9,\s]+))?", re.IGNORECASE)
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -1037,6 +1072,25 @@ DETECTORS = {
     "write-discard": detect_write_then_discard,
 }
 
+def _is_suppressed(finding: Finding, source_lines: List[str]) -> bool:
+    """Check if a finding is suppressed by a ``# noqa: DAPxxx`` comment."""
+    if finding.line < 1 or finding.line > len(source_lines):
+        return False
+    line = source_lines[finding.line - 1]
+    m = _NOQA_RE.search(line)
+    if m is None:
+        return False
+    codes_str = m.group(1)
+    if not codes_str:
+        # Bare `# noqa: DAP` with no specific code
+        return "DAP" in line.upper().split("NOQA")[1] if "NOQA" in line.upper() else False
+    codes = {c.strip().upper() for c in codes_str.split(",")}
+    if "DAP" in codes:
+        return True
+    finding_code = _SUBTYPE_TO_CODE.get(finding.subtype, "")
+    return finding_code in codes
+
+
 def scan(
     paths: Sequence[str], patterns: Sequence[str]
 ) -> List[Finding]:
@@ -1049,7 +1103,9 @@ def scan(
             continue
         source_lines = _get_source_lines(filepath)
         for detector in detectors:
-            findings.extend(detector(filepath, tree, source_lines))
+            for finding in detector(filepath, tree, source_lines):
+                if not _is_suppressed(finding, source_lines):
+                    findings.append(finding)
 
     findings.sort(key=lambda f: (f.file, f.line))
     return findings
