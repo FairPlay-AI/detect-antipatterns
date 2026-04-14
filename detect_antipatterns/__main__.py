@@ -22,12 +22,10 @@ import ast
 import json
 import re
 import sys
-import textwrap
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Generator, List, Optional, Sequence, Set, Tuple
-
 
 @dataclass
 class Finding:
@@ -43,7 +41,6 @@ class Finding:
     fix_replacement: str = ""  # replacement text for "replace-lines"
     fix_suggestion: str = ""  # human-readable suggestion for --suggest
 
-
 # Which subtypes support --fix (auto-apply) vs --suggest (emit diff)
 FIXABLE_SUBTYPES = {
     "unused-import",
@@ -55,7 +52,6 @@ SUGGESTABLE_SUBTYPES = {
     "single-use-helper",
     "wrap-then-unwrap",
 }
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -72,7 +68,6 @@ SKIP_DIRS = {
     "*.egg-info",
 }
 
-
 def iter_python_files(paths: Sequence[str]) -> Generator[Path, None, None]:
     for p in paths:
         path = Path(p)
@@ -84,13 +79,11 @@ def iter_python_files(paths: Sequence[str]) -> Generator[Path, None, None]:
                     continue
                 yield child
 
-
 def parse_file(path: Path) -> Optional[ast.Module]:
     try:
         return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (SyntaxError, UnicodeDecodeError):
         return None
-
 
 def _get_source_lines(path: Path) -> List[str]:
     try:
@@ -98,12 +91,10 @@ def _get_source_lines(path: Path) -> List[str]:
     except (OSError, UnicodeDecodeError):
         return []
 
-
 def _snippet(lines: List[str], lineno: int, context: int = 1) -> str:
     start = max(0, lineno - 1 - context)
     end = min(len(lines), lineno + context)
     return "\n".join(lines[start:end])
-
 
 def _func_body_no_docstring(node: ast.FunctionDef) -> List[ast.stmt]:
     body = node.body
@@ -115,14 +106,12 @@ def _func_body_no_docstring(node: ast.FunctionDef) -> List[ast.stmt]:
         return body[1:]
     return body
 
-
 def _call_name(node: ast.Call) -> Optional[str]:
     if isinstance(node.func, ast.Name):
         return node.func.id
     if isinstance(node.func, ast.Attribute):
         return node.func.attr
     return None
-
 
 def _call_full_name(node: ast.Call) -> Optional[str]:
     if isinstance(node.func, ast.Name):
@@ -138,11 +127,9 @@ def _call_full_name(node: ast.Call) -> Optional[str]:
         return ".".join(reversed(parts))
     return None
 
-
 # ---------------------------------------------------------------------------
 # Detector 1: Thin Shims
 # ---------------------------------------------------------------------------
-
 
 def detect_thin_shims(
     path: Path, tree: ast.Module, lines: List[str]
@@ -232,13 +219,11 @@ def detect_thin_shims(
                     code_snippet=_snippet(lines, node.lineno),
                 )
 
-
 def _classify_shim(
     func: ast.FunctionDef, call: ast.Call
 ) -> str:
     """Classify a shim as pure-rename, arg-reshaper, or config-unpacker."""
     func_args = {a.arg for a in func.args.args}
-    # Check if any call arg is an attribute access (config.field pattern)
     has_attr_access = any(
         isinstance(a, ast.Attribute) for a in call.args
     ) or any(isinstance(kw.value, ast.Attribute) for kw in call.keywords)
@@ -246,7 +231,6 @@ def _classify_shim(
     if has_attr_access:
         return "config-unpacker"
 
-    # Check if the call args are a simple passthrough of function params
     call_arg_names = set()
     for a in call.args:
         if isinstance(a, ast.Name):
@@ -260,11 +244,9 @@ def _classify_shim(
 
     return "arg-reshaper"
 
-
 # ---------------------------------------------------------------------------
 # Detector 2: Phantom Guards
 # ---------------------------------------------------------------------------
-
 
 def detect_phantom_guards(
     path: Path, tree: ast.Module, lines: List[str]
@@ -292,7 +274,6 @@ def detect_phantom_guards(
                             arg.value, (int, float)
                         ):
                             if 0 < arg.value < 0.01:
-                                other = node.args[1 - i]
                                 yield Finding(
                                     file=str(path),
                                     line=node.lineno,
@@ -418,7 +399,6 @@ def detect_phantom_guards(
                             code_snippet=_snippet(lines, child.lineno),
                         )
 
-
 def _annotation_allows_none(annot: ast.expr) -> bool:
     """Check if a type annotation includes None/Optional."""
     if isinstance(annot, ast.Constant) and annot.value is None:
@@ -431,7 +411,7 @@ def _annotation_allows_none(annot: ast.expr) -> bool:
             if annot.value.id == "Optional":
                 return True
             if annot.value.id == "Union":
-                # Check if None is in the union
+                pass
                 if isinstance(annot.slice, ast.Tuple):
                     for elt in annot.slice.elts:
                         if isinstance(elt, ast.Constant) and elt.value is None:
@@ -445,11 +425,9 @@ def _annotation_allows_none(annot: ast.expr) -> bool:
         )
     return False
 
-
 # ---------------------------------------------------------------------------
 # Detector 3: Unnecessary Indirection
 # ---------------------------------------------------------------------------
-
 
 def detect_unnecessary_indirection(
     path: Path, tree: ast.Module, lines: List[str]
@@ -486,7 +464,6 @@ def detect_unnecessary_indirection(
                 continue
 
             call = ret.value
-            # Check if most call args are attribute accesses on the same object
             attr_sources = []
             for arg in list(call.args) + [kw.value for kw in call.keywords]:
                 if isinstance(arg, ast.Attribute) and isinstance(
@@ -539,7 +516,6 @@ def detect_unnecessary_indirection(
             ):
                 continue
 
-            # Check if it delegates to self.something.method()
             call = ret.value
             if isinstance(call.func, ast.Attribute):
                 if isinstance(call.func.value, ast.Attribute):
@@ -560,7 +536,6 @@ def detect_unnecessary_indirection(
                                 code_snippet=_snippet(lines, node.lineno),
                             )
 
-
 # ---------------------------------------------------------------------------
 # Detector 4: Over-Commenting
 # ---------------------------------------------------------------------------
@@ -575,7 +550,6 @@ _TRIVIAL_COMMENT_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-
 
 def detect_over_commenting(
     path: Path, tree: ast.Module, lines: List[str]
@@ -634,11 +608,9 @@ def detect_over_commenting(
                 ),
             )
 
-
 # ---------------------------------------------------------------------------
 # Detector 5: Single-Use Helpers
 # ---------------------------------------------------------------------------
-
 
 def detect_single_use_helpers(
     path: Path, tree: ast.Module, lines: List[str]
@@ -701,11 +673,9 @@ def detect_single_use_helpers(
                     fix_suggestion=suggestion,
                 )
 
-
 # ---------------------------------------------------------------------------
 # Detector 6: Dead Code (unused imports, write-never-read locals)
 # ---------------------------------------------------------------------------
-
 
 def detect_dead_code(
     path: Path, tree: ast.Module, lines: List[str]
@@ -751,9 +721,6 @@ def detect_dead_code(
 
     for name, lineno in imported_names.items():
         if name not in referenced_names and not name.startswith("_"):
-            # Determine if this is a single-name import line we can safely
-            # delete, or a multi-name line that needs manual editing.
-            source_line = lines[lineno - 1] if lineno <= len(lines) else ""
             # Count how many imported names share this line number
             names_on_line = [
                 n for n, ln in imported_names.items() if ln == lineno
@@ -774,7 +741,7 @@ def detect_dead_code(
                 fix_lines = (0, 0)
             else:
                 # All names on this line are unused — delete the whole
-                # import statement (may span multiple lines via parens
+                pass
                 # or backslash continuation)
                 for node in ast.iter_child_nodes(tree):
                     if (
@@ -852,14 +819,12 @@ def detect_dead_code(
                 code_snippet=_snippet(lines, line_list[0], context=0),
             )
 
-
 # ---------------------------------------------------------------------------
 # Detector 7: Stray Prints / Debug Logging
 # ---------------------------------------------------------------------------
 
 _STRAY_PRINT_FUNCS = {"print", "pprint", "pp"}
 _DEBUG_LOG_METHODS = {"debug"}
-
 
 def detect_stray_prints(
     path: Path, tree: ast.Module, lines: List[str]
@@ -874,7 +839,6 @@ def detect_stray_prints(
     ):
         return
 
-    # Check if file has `if __name__ == "__main__"` — likely a script, skip
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.If):
             # Quick check for if __name__ == "__main__"
@@ -894,7 +858,6 @@ def detect_stray_prints(
         if isinstance(node.func, ast.Name) and node.func.id in _STRAY_PRINT_FUNCS:
             # Only fixable if the print is a standalone Expr statement
             # (not embedded in an assignment or return)
-            end = getattr(node, "end_lineno", node.lineno)
             # Walk up: find the parent Expr statement
             fix_action = ""
             fix_lines: Tuple[int, int] = (0, 0)
@@ -934,11 +897,9 @@ def detect_stray_prints(
                 code_snippet=_snippet(lines, node.lineno, context=0),
             )
 
-
 # ---------------------------------------------------------------------------
 # Detector 8: Write-Then-Discard
 # ---------------------------------------------------------------------------
-
 
 def detect_write_then_discard(
     path: Path, tree: ast.Module, lines: List[str]
@@ -969,7 +930,7 @@ def detect_write_then_discard(
                             isinstance(next_target, ast.Name)
                             and next_target.id == target.id
                         ):
-                            # Check the second assignment doesn't reference
+                            pass
                             # the variable (e.g., x = x + 1 is fine)
                             refs = set()
                             for child in ast.walk(next_stmt.value):
@@ -1061,7 +1022,6 @@ def detect_write_then_discard(
                         continue
                     break
 
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1076,7 +1036,6 @@ DETECTORS = {
     "stray-print": detect_stray_prints,
     "write-discard": detect_write_then_discard,
 }
-
 
 def scan(
     paths: Sequence[str], patterns: Sequence[str]
@@ -1095,11 +1054,9 @@ def scan(
     findings.sort(key=lambda f: (f.file, f.line))
     return findings
 
-
 # ---------------------------------------------------------------------------
 # --fix: auto-apply safe fixes
 # ---------------------------------------------------------------------------
-
 
 def apply_fixes(findings: List[Finding]) -> Tuple[int, int]:
     """Apply delete-lines fixes in-place. Returns (fixed, skipped) counts."""
@@ -1155,7 +1112,6 @@ def apply_fixes(findings: List[Finding]) -> Tuple[int, int]:
         needs_pass: Dict[int, str] = {}  # line -> indentation for `pass`
         for f in file_findings:
             start, end = f.fix_lines
-            # Check if any line in this range is the sole body of a block
             is_sole = any(
                 ln in sole_body_lines for ln in range(start, end + 1)
             )
@@ -1204,11 +1160,9 @@ def apply_fixes(findings: List[Finding]) -> Tuple[int, int]:
 
     return fixed, skipped
 
-
 # ---------------------------------------------------------------------------
 # --suggest: emit unified diffs for human review
 # ---------------------------------------------------------------------------
-
 
 def emit_suggestions(findings: List[Finding]) -> str:
     """Emit human-readable suggestions for findings that support --suggest."""
@@ -1267,7 +1221,6 @@ def emit_suggestions(findings: List[Finding]) -> str:
 
     return "\n".join(out)
 
-
 def format_text(findings: List[Finding]) -> str:
     if not findings:
         return "No anti-patterns found."
@@ -1291,10 +1244,8 @@ def format_text(findings: List[Finding]) -> str:
     out.append(f"\n--- {len(findings)} finding(s) ---")
     return "\n".join(out)
 
-
 def format_json(findings: List[Finding]) -> str:
     return json.dumps([asdict(f) for f in findings], indent=2)
-
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
@@ -1369,7 +1320,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(format_text(findings))
 
     return 1 if findings else 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
