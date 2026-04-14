@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "detect-antipatterns"
+version = "0.1.0"
+description = "Detect and fix common AI-generated code anti-patterns in Python"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "FairPlay AI"}]
+keywords = ["linting", "code-quality", "anti-patterns", "ai-generated-code"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/FairPlay-AI/detect-antipatterns"
+Issues = "https://github.com/FairPlay-AI/detect-antipatterns/issues"
+
+[project.scripts]
+detect-antipatterns = "detect_antipatterns:main"
