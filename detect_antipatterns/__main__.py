@@ -1166,8 +1166,28 @@ def _is_suppressed(finding: Finding, source_lines: List[str]) -> bool:
     return finding_code in codes
 
 
+def _matches_codes(subtype: str, codes: Set[str]) -> bool:
+    """Return True iff ``subtype`` matches any entry in ``codes``.
+
+    An entry matches if it is the bare sentinel ``DAP`` (case-insensitive,
+    suppresses everything), a DAP code like ``DAP009`` (case-insensitive),
+    or an exact subtype name (case-sensitive, e.g. ``unused-import``).
+    """
+    if not codes:
+        return False
+    codes_upper = {c.upper() for c in codes}
+    if "DAP" in codes_upper:
+        return True
+    finding_code = _SUBTYPE_TO_CODE.get(subtype, "")
+    if finding_code and finding_code.upper() in codes_upper:
+        return True
+    return subtype in codes
+
+
 def scan(
-    paths: Sequence[str], patterns: Sequence[str]
+    paths: Sequence[str],
+    patterns: Sequence[str],
+    disabled: Optional[Set[str]] = None,
 ) -> List[Finding]:
     findings = []
     detectors = [DETECTORS[p] for p in patterns]
@@ -1179,8 +1199,11 @@ def scan(
         source_lines = _get_source_lines(filepath)
         for detector in detectors:
             for finding in detector(filepath, tree, source_lines):
-                if not _is_suppressed(finding, source_lines):
-                    findings.append(finding)
+                if _is_suppressed(finding, source_lines):
+                    continue
+                if disabled and _matches_codes(finding.subtype, disabled):
+                    continue
+                findings.append(finding)
 
     findings.sort(key=lambda f: (f.file, f.line))
     return findings
@@ -1406,12 +1429,31 @@ def main(argv: Optional[List[str]] = None) -> int:
             "wrap-then-unwrap patterns."
         ),
     )
+    parser.add_argument(
+        "--disable",
+        action="append",
+        default=[],
+        metavar="CODE",
+        help=(
+            "Suppress findings by DAP code or subtype. Repeatable or "
+            "comma-separated: --disable DAP009 or --disable DAP006,unused-import. "
+            "Use --disable DAP to suppress everything. Suppressed findings "
+            "are not reported and are not acted on by --fix."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    disabled: Set[str] = set()
+    for item in args.disable:
+        for token in item.split(","):
+            token = token.strip()
+            if token:
+                disabled.add(token)
 
     patterns = (
         list(DETECTORS.keys()) if args.pattern == "all" else [args.pattern]
     )
-    findings = scan(args.paths, patterns)
+    findings = scan(args.paths, patterns, disabled=disabled)
 
     if args.suggest:
         print(emit_suggestions(findings))
@@ -1422,7 +1464,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Fixed {fixed} issue(s), skipped {skipped}.")
         if skipped:
             # Re-scan and show remaining
-            remaining = scan(args.paths, patterns)
+            remaining = scan(args.paths, patterns, disabled=disabled)
             unfixed = [
                 f
                 for f in remaining
