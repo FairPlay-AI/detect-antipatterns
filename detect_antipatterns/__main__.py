@@ -47,6 +47,7 @@ FIXABLE_SUBTYPES = {
     "stray-print",
     "trivial-comment",
     "immediate-overwrite",
+    "excess-blank-lines",
 }
 SUGGESTABLE_SUBTYPES = {
     "single-use-helper",
@@ -84,6 +85,8 @@ _SUBTYPE_TO_CODE: Dict[str, str] = {
     # DAP008 — write-then-discard
     "immediate-overwrite": "DAP008",
     "wrap-then-unwrap": "DAP008",
+    # DAP009 — excess blank lines
+    "excess-blank-lines": "DAP009",
 }
 
 _NOQA_RE = re.compile(r"#\s*noqa\b(?::?\s*([A-Z0-9,\s]+))?", re.IGNORECASE)
@@ -1089,6 +1092,46 @@ def detect_write_then_discard(
                     break
 
 # ---------------------------------------------------------------------------
+# Detector 9: Excess Blank Lines
+# ---------------------------------------------------------------------------
+
+def detect_excess_blank_lines(
+    path: Path, tree: ast.Module, lines: List[str]
+) -> Generator[Finding, None, None]:
+    """Flag runs of 3+ consecutive blank lines.
+
+    Black collapses runs to at most 2 blank lines between top-level defs and
+    1 inside blocks, so any run of 3+ is non-idiomatic. LLMs frequently emit
+    these as visual section breaks. The fix deletes all but one blank; if
+    the gap should be 2 (between top-level defs), black will restore it.
+    """
+    run_start = 0
+    run_len = 0
+    n = len(lines)
+    # Iterate one extra step so the trailing run is flushed naturally.
+    for i in range(1, n + 2):
+        is_blank = i <= n and lines[i - 1].strip() == ""
+        if is_blank:
+            if run_len == 0:
+                run_start = i
+            run_len += 1
+            continue
+        if run_len >= 3:
+            end = run_start + run_len - 1
+            yield Finding(
+                file=str(path),
+                line=run_start,
+                pattern="garbage",
+                subtype="excess-blank-lines",
+                description=(
+                    f"{run_len} consecutive blank lines (L{run_start}-L{end})"
+                ),
+                fix_action="delete-lines",
+                fix_lines=(run_start + 1, end),
+            )
+        run_len = 0
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1101,6 +1144,7 @@ DETECTORS = {
     "deadcode": detect_dead_code,
     "stray-print": detect_stray_prints,
     "write-discard": detect_write_then_discard,
+    "blank-lines": detect_excess_blank_lines,
 }
 
 def _is_suppressed(finding: Finding, source_lines: List[str]) -> bool:
@@ -1231,18 +1275,7 @@ def apply_fixes(findings: List[Finding]) -> Tuple[int, int]:
             elif i not in lines_to_delete:
                 new_lines.append(line)
 
-        # Remove trailing blank-line clusters left by deletions
-        # (two+ consecutive blank lines → one)
-        cleaned: List[str] = []
-        prev_blank = False
-        for line in new_lines:
-            is_blank = line.strip() == ""
-            if is_blank and prev_blank:
-                continue
-            cleaned.append(line)
-            prev_blank = is_blank
-
-        path.write_text("".join(cleaned), encoding="utf-8")
+        path.write_text("".join(new_lines), encoding="utf-8")
         fixed += len(file_findings)
 
     return fixed, skipped
