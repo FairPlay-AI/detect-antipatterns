@@ -101,3 +101,105 @@ class TestApplyFixesPreservesBlankGaps:
         path = _write(tmp_path, src)
         findings = scan([str(path)], list(DETECTORS.keys()))
         assert _findings_of(findings, "excess-blank-lines")
+
+
+# ---------------------------------------------------------------------------
+# Epic 2: --disable CLI flag
+# ---------------------------------------------------------------------------
+
+class TestDisableSuppression:
+    def test_disable_dap_code_filters_matching_findings(self, tmp_path: Path) -> None:
+        src = "x = 1\n\n\n\ny = 2\n"
+        path = _write(tmp_path, src)
+        # Baseline — the finding is present.
+        baseline = scan([str(path)], ["blank-lines"])
+        assert _findings_of(baseline, "excess-blank-lines")
+        # With DAP009 disabled it must be dropped.
+        filtered = scan([str(path)], ["blank-lines"], disabled={"DAP009"})
+        assert _findings_of(filtered, "excess-blank-lines") == []
+
+    def test_disable_by_subtype_name(self, tmp_path: Path) -> None:
+        src = "import os\n"  # `os` is unused → unused-import finding
+        path = _write(tmp_path, src)
+        baseline = scan([str(path)], ["deadcode"])
+        assert _findings_of(baseline, "unused-import")
+        filtered = scan([str(path)], ["deadcode"], disabled={"unused-import"})
+        assert _findings_of(filtered, "unused-import") == []
+
+    def test_disable_code_does_not_leak_across_subtypes(
+        self, tmp_path: Path
+    ) -> None:
+        # DAP009 disabled must NOT affect DAP006 findings in the same file.
+        src = "import os\n\n\n\nx = 1\n"  # unused import + 3 blank run
+        path = _write(tmp_path, src)
+        filtered = scan(
+            [str(path)], ["deadcode", "blank-lines"], disabled={"DAP009"}
+        )
+        assert _findings_of(filtered, "excess-blank-lines") == []
+        assert _findings_of(filtered, "unused-import")
+
+    def test_disable_code_case_insensitive(self, tmp_path: Path) -> None:
+        src = "x = 1\n\n\n\ny = 2\n"
+        path = _write(tmp_path, src)
+        for code in ("dap009", "Dap009", "DAP009"):
+            filtered = scan([str(path)], ["blank-lines"], disabled={code})
+            assert _findings_of(filtered, "excess-blank-lines") == [], code
+
+    def test_cli_disable_comma_separated(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from detect_antipatterns.__main__ import main
+        src = "import os\n\n\n\nx = 1\n"  # unused import + 3 blank run
+        path = _write(tmp_path, src)
+        # Comma-separated: should suppress both.
+        main([str(path), "--disable", "DAP006,DAP009"])
+        out = capsys.readouterr().out
+        assert "unused-import" not in out
+        assert "excess-blank-lines" not in out
+
+    def test_cli_disable_repeated_flags(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from detect_antipatterns.__main__ import main
+        src = "import os\n\n\n\nx = 1\n"
+        path = _write(tmp_path, src)
+        main([str(path), "--disable", "DAP006", "--disable", "DAP009"])
+        out = capsys.readouterr().out
+        assert "unused-import" not in out
+        assert "excess-blank-lines" not in out
+
+    def test_disable_bare_DAP_suppresses_everything(
+        self, tmp_path: Path
+    ) -> None:
+        src = "import os\n\n\n\nx = 1\n"
+        path = _write(tmp_path, src)
+        findings = scan(
+            [str(path)], ["deadcode", "blank-lines"], disabled={"DAP"}
+        )
+        assert findings == []
+
+    def test_cli_disable_DAP009_prevents_fix(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # With DAP009 disabled, --fix must NOT delete the excess blanks.
+        from detect_antipatterns.__main__ import main
+        original = "x = 1\n\n\n\ny = 2\n"
+        path = _write(tmp_path, original)
+        rc = main([str(path), "--fix", "--disable", "DAP009"])
+        capsys.readouterr()  # discard
+        assert path.read_text() == original
+        assert rc == 1  # no fixes applied
+
+    def test_in_source_noqa_still_suppresses(self, tmp_path: Path) -> None:
+        # noqa suppression must work independently of --disable.
+        src = "import os  # noqa: DAP006\n"
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["deadcode"])
+        assert _findings_of(findings, "unused-import") == []
+
+    def test_disable_empty_set_is_no_op(self, tmp_path: Path) -> None:
+        src = "x = 1\n\n\n\ny = 2\n"
+        path = _write(tmp_path, src)
+        baseline = scan([str(path)], ["blank-lines"])
+        filtered = scan([str(path)], ["blank-lines"], disabled=set())
+        assert len(baseline) == len(filtered) == 1
