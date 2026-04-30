@@ -203,3 +203,263 @@ class TestDisableSuppression:
         baseline = scan([str(path)], ["blank-lines"])
         filtered = scan([str(path)], ["blank-lines"], disabled=set())
         assert len(baseline) == len(filtered) == 1
+
+
+# ---------------------------------------------------------------------------
+# Epic 3: DAP002 log-then-swallow subtype
+# ---------------------------------------------------------------------------
+
+class TestLogThenSwallowDetector:
+    """The camouflage case: handler logs the failure (`logger.warning(...)`)
+    then silently recovers (`return`/`continue`/`pass`/`raise NewError(...)`).
+    Per the no-default-recovery rule, a warning to a log file the operator
+    rarely reads is functionally silent."""
+
+    def test_logger_warning_then_return_fires(self, tmp_path: Path) -> None:
+        src = (
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n"
+            "def f():\n"
+            "    try:\n"
+            "        do_work()\n"
+            "    except Exception as err:\n"
+            "        logger.warning('oops: %s', err)\n"
+            "        return\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert len(_findings_of(findings, "log-then-swallow")) == 1
+
+    def test_logger_then_continue_fires(self, tmp_path: Path) -> None:
+        src = (
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n"
+            "def f(items):\n"
+            "    for item in items:\n"
+            "        try:\n"
+            "            handle(item)\n"
+            "        except Exception as err:\n"
+            "            logger.warning('skip %r: %s', item, err)\n"
+            "            continue\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert len(_findings_of(findings, "log-then-swallow")) == 1
+
+    def test_logger_then_pass_fires(self, tmp_path: Path) -> None:
+        src = (
+            "import logging\n"
+            "log = logging.getLogger(__name__)\n"
+            "def f():\n"
+            "    try:\n"
+            "        do_work()\n"
+            "    except Exception:\n"
+            "        log.error('failed')\n"
+            "        pass\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert len(_findings_of(findings, "log-then-swallow")) == 1
+
+    def test_logger_then_raise_new_without_from_fires(
+        self, tmp_path: Path
+    ) -> None:
+        # Drops context: caller can't see the original error.
+        src = (
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n"
+            "def f():\n"
+            "    try:\n"
+            "        do_work()\n"
+            "    except Exception as err:\n"
+            "        logger.warning('oops: %s', err)\n"
+            "        raise RuntimeError('something failed')\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert len(_findings_of(findings, "log-then-swallow")) == 1
+
+    def test_multiple_leading_loggers_then_return_fires(
+        self, tmp_path: Path
+    ) -> None:
+        src = (
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n"
+            "def f():\n"
+            "    try:\n"
+            "        do_work()\n"
+            "    except Exception as err:\n"
+            "        logger.warning('a')\n"
+            "        logger.error('b: %s', err)\n"
+            "        return None\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert len(_findings_of(findings, "log-then-swallow")) == 1
+
+    def test_self_logger_attribute_chain_fires(self, tmp_path: Path) -> None:
+        src = (
+            "class C:\n"
+            "    def f(self):\n"
+            "        try:\n"
+            "            self.do_work()\n"
+            "        except Exception as err:\n"
+            "            self.logger.warning('oops: %s', err)\n"
+            "            return\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert len(_findings_of(findings, "log-then-swallow")) == 1
+
+    # --- negatives ---
+
+    def test_logger_then_bare_reraise_does_not_fire(
+        self, tmp_path: Path
+    ) -> None:
+        src = (
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n"
+            "def f():\n"
+            "    try:\n"
+            "        do_work()\n"
+            "    except Exception as err:\n"
+            "        logger.warning('oops: %s', err)\n"
+            "        raise\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert _findings_of(findings, "log-then-swallow") == []
+
+    def test_logger_then_raise_new_with_from_does_not_fire(
+        self, tmp_path: Path
+    ) -> None:
+        # `raise NewError(...) from err` preserves the cause chain.
+        src = (
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n"
+            "def f():\n"
+            "    try:\n"
+            "        do_work()\n"
+            "    except Exception as err:\n"
+            "        logger.warning('oops: %s', err)\n"
+            "        raise RuntimeError('wrapped') from err\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert _findings_of(findings, "log-then-swallow") == []
+
+    def test_logger_then_raise_bound_name_does_not_fire(
+        self, tmp_path: Path
+    ) -> None:
+        # `raise err` where err is the bound exception is just re-raising.
+        src = (
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n"
+            "def f():\n"
+            "    try:\n"
+            "        do_work()\n"
+            "    except Exception as err:\n"
+            "        logger.warning('oops: %s', err)\n"
+            "        raise err\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert _findings_of(findings, "log-then-swallow") == []
+
+    def test_narrow_except_does_not_fire(self, tmp_path: Path) -> None:
+        # `except KeyError:` is targeted, not slop.
+        src = (
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n"
+            "def f(d):\n"
+            "    try:\n"
+            "        return d['x']\n"
+            "    except KeyError as err:\n"
+            "        logger.warning('missing: %s', err)\n"
+            "        return None\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert _findings_of(findings, "log-then-swallow") == []
+
+    def test_work_between_log_and_recovery_does_not_fire(
+        self, tmp_path: Path
+    ) -> None:
+        # If the handler does additional work besides log+return, treat as
+        # an intentional fallback path.
+        src = (
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n"
+            "state = {}\n"
+            "def f():\n"
+            "    try:\n"
+            "        do_work()\n"
+            "    except Exception as err:\n"
+            "        logger.warning('oops: %s', err)\n"
+            "        state['fallback'] = True\n"
+            "        return\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert _findings_of(findings, "log-then-swallow") == []
+
+    def test_no_logger_uses_existing_broad_except_subtype(
+        self, tmp_path: Path
+    ) -> None:
+        # `except Exception: pass` — no leading logger, falls under existing
+        # broad-except-swallowed, NOT log-then-swallow.
+        src = (
+            "def f():\n"
+            "    try:\n"
+            "        do_work()\n"
+            "    except Exception:\n"
+            "        pass\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert _findings_of(findings, "log-then-swallow") == []
+        assert _findings_of(findings, "broad-except-swallowed") != []
+
+    def test_decorated_error_handler_does_not_fire(
+        self, tmp_path: Path
+    ) -> None:
+        # Click commands and Flask error handlers conventionally log + return
+        # as their documented contract.
+        src = (
+            "import logging\n"
+            "import click\n"
+            "logger = logging.getLogger(__name__)\n"
+            "@click.command\n"
+            "def f():\n"
+            "    try:\n"
+            "        do_work()\n"
+            "    except Exception as err:\n"
+            "        logger.warning('oops: %s', err)\n"
+            "        return\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["phantom"])
+        assert _findings_of(findings, "log-then-swallow") == []
+
+    def test_subtype_maps_to_DAP002(self, tmp_path: Path) -> None:
+        from detect_antipatterns.__main__ import _SUBTYPE_TO_CODE
+        assert _SUBTYPE_TO_CODE["log-then-swallow"] == "DAP002"
+
+    def test_disable_DAP002_suppresses_log_then_swallow(
+        self, tmp_path: Path
+    ) -> None:
+        src = (
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n"
+            "def f():\n"
+            "    try:\n"
+            "        do_work()\n"
+            "    except Exception as err:\n"
+            "        logger.warning('oops: %s', err)\n"
+            "        return\n"
+        )
+        path = _write(tmp_path, src)
+        baseline = scan([str(path)], ["phantom"])
+        assert _findings_of(baseline, "log-then-swallow")
+        filtered = scan([str(path)], ["phantom"], disabled={"DAP002"})
+        assert _findings_of(filtered, "log-then-swallow") == []

@@ -66,6 +66,7 @@ _SUBTYPE_TO_CODE: Dict[str, str] = {
     # DAP002 — phantom guards
     "epsilon-guard": "DAP002",
     "broad-except-swallowed": "DAP002",
+    "log-then-swallow": "DAP002",
     "redundant-none-check": "DAP002",
     "redundant-isinstance": "DAP002",
     # DAP003 — unnecessary indirection
@@ -164,6 +165,59 @@ def _call_full_name(node: ast.Call) -> Optional[str]:
             parts.append(n.id)
         return ".".join(reversed(parts))
     return None
+
+# Logger-shaped calls (used by DAP002 log-then-swallow)
+_LOGGER_NAMES = frozenset({"logger", "log", "logging"})
+_LOGGER_LEVELS = frozenset({
+    "debug", "info", "warning", "warn",
+    "error", "exception", "critical", "fatal",
+})
+# Decorators whose contract conventionally INCLUDES log+return on error,
+# so a log-then-swallow handler inside one is the documented behavior.
+_ERROR_HANDLER_DECORATOR_ATTRS = frozenset({
+    "command",        # @click.command
+    "errorhandler",   # @app.errorhandler
+    "fixture",        # @pytest.fixture
+})
+
+
+def _is_logger_call(stmt: ast.stmt) -> bool:
+    """True iff `stmt` is `<logger-shaped>.<level>(...)` as an Expr.
+
+    Logger-shaped: a Name in {logger, log, logging}, OR an Attribute
+    chain whose final attribute is one of those (e.g. `self.logger`,
+    `mod.log`).
+    """
+    if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+        return False
+    func = stmt.value.func
+    if not (isinstance(func, ast.Attribute) and func.attr in _LOGGER_LEVELS):
+        return False
+    target = func.value
+    if isinstance(target, ast.Name):
+        return target.id in _LOGGER_NAMES
+    if isinstance(target, ast.Attribute):
+        return target.attr in _LOGGER_NAMES
+    return False
+
+
+def _has_error_handler_decorator(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    """True iff `func` has any decorator whose final identifier is in
+    _ERROR_HANDLER_DECORATOR_ATTRS (e.g. @click.command, @app.errorhandler,
+    @pytest.fixture, including their `@dec(...)` call forms).
+    """
+    for dec in func.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        if isinstance(target, ast.Attribute):
+            if target.attr in _ERROR_HANDLER_DECORATOR_ATTRS:
+                return True
+        elif isinstance(target, ast.Name):
+            if target.id in _ERROR_HANDLER_DECORATOR_ATTRS:
+                return True
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Detector 1: Thin Shims
@@ -302,6 +356,24 @@ def detect_phantom_guards(
             if annotations:
                 func_param_annotations[id(node)] = annotations
 
+    # Build a child->parent map for the log-then-swallow decorator skip:
+    # we need to find the enclosing FunctionDef of a Try node, and ast.walk
+    # doesn't preserve parent links.
+    parents: Dict[int, ast.AST] = {}
+    for parent_node in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent_node):
+            parents[id(child)] = parent_node
+
+    def _enclosing_function(
+        node: ast.AST,
+    ) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+        cur: ast.AST = node
+        while id(cur) in parents:
+            cur = parents[id(cur)]
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return cur
+        return None
+
     for node in ast.walk(tree):
         # --- Epsilon guards: max(expr, 1e-5) ---
         if isinstance(node, ast.Call):
@@ -367,6 +439,62 @@ def detect_phantom_guards(
                             ),
                             code_snippet=_snippet(lines, handler.lineno),
                         )
+
+                # --- Log-then-swallow: leading logger calls + silent recovery
+                # The "camouflage" case the existing broad-except-swallowed
+                # gate misses: handler logs the failure (looks like the dev
+                # cared) and then silently recovers via return/continue/pass
+                # or `raise NewError(...)` without `from err` (drops context).
+                # A warning written to a log file the operator rarely reads
+                # is functionally silent.
+                if is_broad and handler.body:
+                    body = handler.body
+                    log_count = 0
+                    while log_count < len(body) and _is_logger_call(
+                        body[log_count]
+                    ):
+                        log_count += 1
+                    if log_count > 0 and len(body) == log_count + 1:
+                        final = body[log_count]
+                        is_recovery = False
+                        if isinstance(final, (ast.Pass, ast.Continue)):
+                            is_recovery = True
+                        elif isinstance(final, ast.Return):
+                            # Restrict to bare/constant returns; `return value`
+                            # may carry meaning to the caller and is out of
+                            # scope.
+                            is_recovery = (
+                                final.value is None
+                                or isinstance(final.value, ast.Constant)
+                            )
+                        elif isinstance(final, ast.Raise):
+                            # Drops context: a fresh exception instance with
+                            # no `from err` chain. Bare `raise` (re-raise)
+                            # and `raise <Name>` (re-raise bound name) are
+                            # legitimate.
+                            is_recovery = (
+                                isinstance(final.exc, ast.Call)
+                                and final.cause is None
+                            )
+                        if is_recovery:
+                            func = _enclosing_function(node)
+                            if func is None or not _has_error_handler_decorator(
+                                func
+                            ):
+                                yield Finding(
+                                    file=str(path),
+                                    line=handler.lineno,
+                                    pattern="phantom",
+                                    subtype="log-then-swallow",
+                                    description=(
+                                        "Broad except logs and silently "
+                                        "recovers — broken state is invisible"
+                                        " to operators not tailing the log"
+                                    ),
+                                    code_snippet=_snippet(
+                                        lines, handler.lineno
+                                    ),
+                                )
 
         # --- Redundant None checks on non-Optional params ---
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
