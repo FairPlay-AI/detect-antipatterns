@@ -1517,7 +1517,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     all_patterns = list(DETECTORS.keys())
     parser.add_argument(
         "--pattern",
-        choices=all_patterns + ["all"],
+        choices=[*all_patterns, "all"],
         default="all",
         help=f"Which pattern to detect (default: all). Choices: {', '.join(all_patterns)}",
     )

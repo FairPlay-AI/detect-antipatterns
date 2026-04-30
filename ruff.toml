@@ -1,0 +1,32 @@
+# Ruff config for detect-antipatterns' own self-scan in CI.
+#
+# Scope: structural / type-and-structure rules (substantive misapplied-
+# practice patterns), not style/formatting. Mirrors a subset of
+# ai-slop-detector's ruff-slop.toml — kept here so CI can run without
+# pulling the (private) ai-slop-detector repo.
+
+target-version = "py310"
+line-length = 100
+
+extend-exclude = [
+    "build",
+    "dist",
+    "*.egg-info",
+    ".venv",
+    "venv",
+]
+
+[lint]
+# DAP* / SLOP* in `# noqa` markers come from external linters; tell
+# Ruff so it doesn't flag them as RUF100 (unused-noqa).
+external = ["DAP", "SLOP"]
+
+select = [
+    "F",        # pyflakes (unused imports, undefined names, F541 f-string-no-placeholder, ...)
+    "B",        # flake8-bugbear (B007 unused-loop-var, B904 raise-from-none, ...)
+    "ARG",      # flake8-unused-arguments (ARG001)
+    "ERA",      # eradicate (ERA001 commented-out code)
+    "RUF",      # ruff-specific (RUF100 unused-noqa)
+]
+
+ignore = []

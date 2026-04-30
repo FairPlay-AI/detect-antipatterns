@@ -49,10 +49,12 @@ jobs:
         run: pytest -v
 
   scan:
+    # Dogfooding: run DAP and Ruff over our own source. Two separate
+    # invocations because the full ai-slop-detector pipeline (which
+    # bundles them together) is in a private repo and the default
+    # GITHUB_TOKEN can't clone it. If GHAS / a PAT becomes available,
+    # this job can be upgraded to call slop-detect directly.
     runs-on: ubuntu-latest
-    env:
-      SCAN_TARGET: ${{ github.workspace }}/detect_antipatterns
-      SCAN_PACKAGE: detect_antipatterns
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,38 +65,18 @@ jobs:
           python-version: "3.10"
           cache: pip
 
-      - name: Install ai-slop-detector + this PR's detect-antipatterns
+      - name: Install
         run: |
           python -m pip install --upgrade pip
-          # Install ai-slop-detector first — it pulls a DAP from main as
-          # a transitive dep. Then install the PR's checkout editable
-          # afterwards, so the editable install OVERRIDES the transitive
-          # one. This guarantees the scan runs against the code under
-          # review, not against main.
-          pip install git+https://github.com/FairPlay-AI/ai-slop-detector.git
-          pip install -e . --force-reinstall --no-deps
+          pip install -e .
+          pip install ruff
 
-      - name: Run scan
-        id: scan
+      - name: Ruff
+        # Uses ./ruff.toml — structural / type-and-structure rules,
+        # not style. Mirrors a subset of ai-slop-detector's ruff-slop.toml.
         run: |
-          mkdir -p out
-          slop-detect "$SCAN_TARGET" \
-            --package "$SCAN_PACKAGE" \
-            --summary \
-            -o out/slop.sarif 2> >(tee -a $GITHUB_STEP_SUMMARY >&2)
+          ruff check detect_antipatterns/ --config ruff.toml
 
-      - name: Upload SARIF as artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dap-self-scan
-          path: out/slop.sarif
-          retention-days: 30
-
-      - name: Upload SARIF to Code Scanning
-        if: always()
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: out/slop.sarif
-          category: detect-antipatterns
+      - name: DAP self-scan
+        run: |
+          python -m detect_antipatterns detect_antipatterns/
