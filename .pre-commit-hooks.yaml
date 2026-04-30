@@ -1,0 +1,43 @@
+# Hooks consumable from a downstream repo via:
+#
+#   # .pre-commit-config.yaml in the consuming repo:
+#   repos:
+#     - repo: https://github.com/FairPlay-AI/detect-antipatterns
+#       rev: <tag-or-sha>           # pin to a release tag or commit SHA
+#       hooks:
+#         - id: detect-antipatterns
+#
+# Two hooks are exposed:
+#
+#   - detect-antipatterns (default)  Runs the DAP scan in report mode (no
+#                                    auto-fix). Exits non-zero on findings,
+#                                    suitable for blocking commits.
+#
+#   - detect-antipatterns-fix        Runs DAP in --fix mode, applying safe
+#                                    auto-fixes (unused imports, stray
+#                                    prints, trivial comments, immediate
+#                                    overwrites, blank-line collapse).
+#                                    Use as a manual or pre-push hook.
+#
+# Both hooks scan the whole working directory once (pass_filenames: false)
+# rather than per-file, because DAP's noqa filtering and some detectors
+# need the full file context.
+
+- id: detect-antipatterns
+  name: detect-antipatterns (report)
+  description: Detect AI-generated code anti-patterns (DAP001-DAP009). Exits non-zero on findings.
+  entry: detect-antipatterns
+  language: python
+  pass_filenames: false
+  types: [python]
+  args: ['.']
+
+- id: detect-antipatterns-fix
+  name: detect-antipatterns (auto-fix)
+  description: Apply DAP's safe auto-fixes (unused imports, stray prints, trivial comments, immediate overwrites, blank-line collapse).
+  entry: detect-antipatterns
+  language: python
+  pass_filenames: false
+  types: [python]
+  args: ['.', '--fix']
+  stages: [manual, pre-push]

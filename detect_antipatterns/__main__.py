@@ -27,6 +27,19 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Generator, List, Optional, Sequence, Set, Tuple
 
+# Public API surface. External callers (tests, downstream code,
+# `__init__.py` re-exports) use these names; DAP005's single-use-helper
+# rule honors `__all__` to avoid flagging legitimate public functions
+# whose only in-file call site is `main()`.
+__all__ = [
+    "DETECTORS",
+    "Finding",
+    "apply_fixes",
+    "main",
+    "scan",
+]
+
+
 @dataclass
 class Finding:
     file: str
@@ -54,10 +67,10 @@ SUGGESTABLE_SUBTYPES = {
     "wrap-then-unwrap",
 }
 
-# noqa codes: use `# noqa: DAP001` to suppress a specific finding.
-# `# noqa: DAP` suppresses all detect-antipatterns findings on that line.
-# Codes map to subtype prefixes so multiple subtypes under one detector
-# share a code.
+# Suppression markers (# noqa-style): use `# noqa: DAP001` to suppress a
+# specific finding. `# noqa: DAP` suppresses all detect-antipatterns
+# findings on that line. Codes map to subtype prefixes so multiple
+# subtypes under one detector share a code.
 _SUBTYPE_TO_CODE: Dict[str, str] = {
     # DAP001 — thin shims
     "pure-rename": "DAP001",
@@ -107,17 +120,6 @@ SKIP_DIRS = {
     "*.egg-info",
 }
 
-def iter_python_files(paths: Sequence[str]) -> Generator[Path, None, None]:
-    for p in paths:
-        path = Path(p)
-        if path.is_file() and path.suffix == ".py":
-            yield path
-        elif path.is_dir():
-            for child in sorted(path.rglob("*.py")):
-                if any(part in SKIP_DIRS for part in child.parts):
-                    continue
-                yield child
-
 def parse_file(path: Path) -> Optional[ast.Module]:
     try:
         return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -152,71 +154,18 @@ def _call_name(node: ast.Call) -> Optional[str]:
         return node.func.attr
     return None
 
-def _call_full_name(node: ast.Call) -> Optional[str]:
-    if isinstance(node.func, ast.Name):
-        return node.func.id
-    if isinstance(node.func, ast.Attribute):
-        parts = []
-        n = node.func
-        while isinstance(n, ast.Attribute):
-            parts.append(n.attr)
-            n = n.value
-        if isinstance(n, ast.Name):
-            parts.append(n.id)
-        return ".".join(reversed(parts))
-    return None
-
-# Logger-shaped calls (used by DAP002 log-then-swallow)
+# Logger-shaped calls and known error-handler decorators — used inside
+# DAP002 log-then-swallow detection (see detect_phantom_guards).
 _LOGGER_NAMES = frozenset({"logger", "log", "logging"})
 _LOGGER_LEVELS = frozenset({
     "debug", "info", "warning", "warn",
     "error", "exception", "critical", "fatal",
 })
-# Decorators whose contract conventionally INCLUDES log+return on error,
-# so a log-then-swallow handler inside one is the documented behavior.
 _ERROR_HANDLER_DECORATOR_ATTRS = frozenset({
     "command",        # @click.command
     "errorhandler",   # @app.errorhandler
     "fixture",        # @pytest.fixture
 })
-
-
-def _is_logger_call(stmt: ast.stmt) -> bool:
-    """True iff `stmt` is `<logger-shaped>.<level>(...)` as an Expr.
-
-    Logger-shaped: a Name in {logger, log, logging}, OR an Attribute
-    chain whose final attribute is one of those (e.g. `self.logger`,
-    `mod.log`).
-    """
-    if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
-        return False
-    func = stmt.value.func
-    if not (isinstance(func, ast.Attribute) and func.attr in _LOGGER_LEVELS):
-        return False
-    target = func.value
-    if isinstance(target, ast.Name):
-        return target.id in _LOGGER_NAMES
-    if isinstance(target, ast.Attribute):
-        return target.attr in _LOGGER_NAMES
-    return False
-
-
-def _has_error_handler_decorator(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> bool:
-    """True iff `func` has any decorator whose final identifier is in
-    _ERROR_HANDLER_DECORATOR_ATTRS (e.g. @click.command, @app.errorhandler,
-    @pytest.fixture, including their `@dec(...)` call forms).
-    """
-    for dec in func.decorator_list:
-        target = dec.func if isinstance(dec, ast.Call) else dec
-        if isinstance(target, ast.Attribute):
-            if target.attr in _ERROR_HANDLER_DECORATOR_ATTRS:
-                return True
-        elif isinstance(target, ast.Name):
-            if target.id in _ERROR_HANDLER_DECORATOR_ATTRS:
-                return True
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +313,42 @@ def detect_phantom_guards(
         for child in ast.iter_child_nodes(parent_node):
             parents[id(child)] = parent_node
 
+    def _is_logger_call(stmt: ast.stmt) -> bool:
+        """`<logger-shaped>.<level>(...)` as an Expr stmt. Logger-shaped =
+        a Name in _LOGGER_NAMES, or an Attribute chain whose final attr
+        is one of those (e.g. `self.logger`, `mod.log`)."""
+        if not (
+            isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+        ):
+            return False
+        func_node = stmt.value.func
+        if not (
+            isinstance(func_node, ast.Attribute)
+            and func_node.attr in _LOGGER_LEVELS
+        ):
+            return False
+        target = func_node.value
+        if isinstance(target, ast.Name):
+            return target.id in _LOGGER_NAMES
+        if isinstance(target, ast.Attribute):
+            return target.attr in _LOGGER_NAMES
+        return False
+
+    def _has_error_handler_decorator(
+        func_def: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> bool:
+        """Has any decorator whose final identifier is in
+        _ERROR_HANDLER_DECORATOR_ATTRS (handles bare `@dec` and `@dec(...)`)."""
+        for dec in func_def.decorator_list:
+            tgt = dec.func if isinstance(dec, ast.Call) else dec
+            if isinstance(tgt, ast.Attribute):
+                if tgt.attr in _ERROR_HANDLER_DECORATOR_ATTRS:
+                    return True
+            elif isinstance(tgt, ast.Name):
+                if tgt.id in _ERROR_HANDLER_DECORATOR_ATTRS:
+                    return True
+        return False
+
     def _enclosing_function(
         node: ast.AST,
     ) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
@@ -379,7 +364,7 @@ def detect_phantom_guards(
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id == "max":
                 if len(node.args) == 2:
-                    for i, arg in enumerate(node.args):
+                    for arg in node.args:
                         if isinstance(arg, ast.Constant) and isinstance(
                             arg.value, (int, float)
                         ):
@@ -600,6 +585,21 @@ def detect_unnecessary_indirection(
 ) -> Generator[Finding, None, None]:
     """Find config-unpacker wrappers and single-method proxy classes."""
 
+    def _call_full_name(call: ast.Call) -> Optional[str]:
+        """Dotted name for a Call's callee — `foo`, `mod.foo`, `a.b.c.foo`."""
+        if isinstance(call.func, ast.Name):
+            return call.func.id
+        if isinstance(call.func, ast.Attribute):
+            parts: List[str] = []
+            n: ast.expr = call.func
+            while isinstance(n, ast.Attribute):
+                parts.append(n.attr)
+                n = n.value
+            if isinstance(n, ast.Name):
+                parts.append(n.id)
+            return ".".join(reversed(parts))
+        return None
+
     # Method names that are inherently "config-unpacker shaped" but are
     # legitimate framework patterns (Luigi requires(), copy(), etc.)
     INDIRECTION_METHOD_SKIP = {"requires", "copy", "clone", "__copy__", "__deepcopy__"}
@@ -718,7 +718,7 @@ _TRIVIAL_COMMENT_RE = re.compile(
 )
 
 def detect_over_commenting(
-    path: Path, tree: ast.Module, lines: List[str]
+    path: Path, _tree: ast.Module, lines: List[str]
 ) -> Generator[Finding, None, None]:
     """Flag files where comment density is suspiciously high, and individual
     comments that merely paraphrase the adjacent code line."""
@@ -784,12 +784,34 @@ def detect_single_use_helpers(
     """Find module-level functions that are called from exactly one site
     in the same file, suggesting premature extraction."""
 
+    # If the module declares `__all__`, every name in it is, by author
+    # intent, public API — external callers (tests, sister modules, etc.)
+    # use it, and the "single-use in this file" heuristic is a known FP
+    # for those names.
+    declared_public: Set[str] = set()
+    for stmt in tree.body:
+        if not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        if not any(
+            isinstance(t, ast.Name) and t.id == "__all__" for t in targets
+        ):
+            continue
+        value = stmt.value
+        if isinstance(value, (ast.List, ast.Tuple)):
+            for elt in value.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    declared_public.add(elt.value)
+
     # Collect all module-level function defs (not methods)
     module_funcs: Dict[str, ast.FunctionDef] = {}
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             # Skip private/dunder and test helpers
             if node.name.startswith("__") or node.name.startswith("test_"):
+                continue
+            # Skip names the module explicitly declares as public API
+            if node.name in declared_public:
                 continue
             module_funcs[node.name] = node
 
@@ -887,8 +909,8 @@ def detect_dead_code(
 
     for name, lineno in imported_names.items():
         if name not in referenced_names and not name.startswith("_"):
-            # Skip imports that already have a # noqa comment (e.g., F401
-            # for intentional re-exports)
+            # Skip imports that already have an explicit suppression
+            # marker (e.g., F401 for intentional re-exports)
             if lineno <= len(lines) and re.search(
                 r"#\s*noqa\b", lines[lineno - 1]
             ):
@@ -1049,7 +1071,7 @@ def detect_stray_prints(
         if not isinstance(node, ast.Call):
             continue
 
-        # print() / pprint()
+        # Section: bare print/pprint calls
         if isinstance(node.func, ast.Name) and node.func.id in _STRAY_PRINT_FUNCS:
             if _is_inside_verbose_guard(node):
                 continue
@@ -1080,7 +1102,7 @@ def detect_stray_prints(
                 fix_lines=fix_lines,
             )
 
-        # logging.debug() or logger.debug()
+        # Section: debug-level logging on logging or logger
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr in _DEBUG_LOG_METHODS
@@ -1192,10 +1214,10 @@ def detect_write_then_discard(
                                 if isinstance(a, ast.Name):
                                     orig_args = a.id
                             suggestion = (
-                                f"Pass the original value"
+                                "Pass the original value"
                                 + (f" ({orig_args})" if orig_args else "")
-                                + f" directly instead of wrapping with "
-                                f"{wrapper_name}() then subscripting"
+                                + " directly instead of wrapping with "
+                                + f"{wrapper_name}() then subscripting"
                             )
                             yield Finding(
                                 file=str(path),
@@ -1224,7 +1246,7 @@ def detect_write_then_discard(
 # ---------------------------------------------------------------------------
 
 def detect_excess_blank_lines(
-    path: Path, tree: ast.Module, lines: List[str]
+    path: Path, _tree: ast.Module, lines: List[str]
 ) -> Generator[Finding, None, None]:
     """Flag runs of 3+ consecutive blank lines.
 
@@ -1236,7 +1258,6 @@ def detect_excess_blank_lines(
     run_start = 0
     run_len = 0
     n = len(lines)
-    # Iterate one extra step so the trailing run is flushed naturally.
     for i in range(1, n + 2):
         is_blank = i <= n and lines[i - 1].strip() == ""
         if is_blank:
@@ -1275,52 +1296,72 @@ DETECTORS = {
     "blank-lines": detect_excess_blank_lines,
 }
 
-def _is_suppressed(finding: Finding, source_lines: List[str]) -> bool:
-    """Check if a finding is suppressed by a ``# noqa: DAPxxx`` comment."""
-    if finding.line < 1 or finding.line > len(source_lines):
-        return False
-    line = source_lines[finding.line - 1]
-    m = _NOQA_RE.search(line)
-    if m is None:
-        return False
-    codes_str = m.group(1)
-    if not codes_str:
-        # Bare `# noqa: DAP` with no specific code
-        return "DAP" in line.upper().split("NOQA")[1] if "NOQA" in line.upper() else False
-    codes = {c.strip().upper() for c in codes_str.split(",")}
-    if "DAP" in codes:
-        return True
-    finding_code = _SUBTYPE_TO_CODE.get(finding.subtype, "")
-    return finding_code in codes
-
-
-def _matches_codes(subtype: str, codes: Set[str]) -> bool:
-    """Return True iff ``subtype`` matches any entry in ``codes``.
-
-    An entry matches if it is the bare sentinel ``DAP`` (case-insensitive,
-    suppresses everything), a DAP code like ``DAP009`` (case-insensitive),
-    or an exact subtype name (case-sensitive, e.g. ``unused-import``).
-    """
-    if not codes:
-        return False
-    codes_upper = {c.upper() for c in codes}
-    if "DAP" in codes_upper:
-        return True
-    finding_code = _SUBTYPE_TO_CODE.get(subtype, "")
-    if finding_code and finding_code.upper() in codes_upper:
-        return True
-    return subtype in codes
-
-
 def scan(
     paths: Sequence[str],
     patterns: Sequence[str],
     disabled: Optional[Set[str]] = None,
 ) -> List[Finding]:
+    """Run the requested detectors over every Python file under `paths`.
+
+    Findings are filtered by inline `# noqa[: CODES]` markers and by
+    the `disabled` argument (DAP codes or subtype names suppressed
+    via the CLI `--disable` flag).
+    """
+
+    def _is_suppressed(
+        finding: Finding, source_lines: List[str]
+    ) -> bool:
+        """`# noqa[: CODES]` line check for a single finding."""
+        if finding.line < 1 or finding.line > len(source_lines):
+            return False
+        line = source_lines[finding.line - 1]
+        m = _NOQA_RE.search(line)
+        if m is None:
+            return False
+        codes_str = m.group(1)
+        if not codes_str:
+            # Bare `# noqa: DAP` with no specific code
+            return (
+                "DAP" in line.upper().split("NOQA")[1]
+                if "NOQA" in line.upper()
+                else False
+            )
+        codes = {c.strip().upper() for c in codes_str.split(",")}
+        if "DAP" in codes:
+            return True
+        finding_code = _SUBTYPE_TO_CODE.get(finding.subtype, "")
+        return finding_code in codes
+
+    def _matches_codes(subtype: str, codes: Set[str]) -> bool:
+        """An entry in `codes` matches `subtype` if it is the bare sentinel
+        ``DAP`` (suppresses everything), a DAP code like ``DAP009``
+        (case-insensitive), or an exact subtype name (case-sensitive)."""
+        if not codes:
+            return False
+        codes_upper = {c.upper() for c in codes}
+        if "DAP" in codes_upper:
+            return True
+        finding_code = _SUBTYPE_TO_CODE.get(subtype, "")
+        if finding_code and finding_code.upper() in codes_upper:
+            return True
+        return subtype in codes
+
+    def _iter_python_files() -> Generator[Path, None, None]:
+        """Walk `paths`, yielding .py files; skip well-known build/cache dirs."""
+        for p in paths:
+            path = Path(p)
+            if path.is_file() and path.suffix == ".py":
+                yield path
+            elif path.is_dir():
+                for child in sorted(path.rglob("*.py")):
+                    if any(part in SKIP_DIRS for part in child.parts):
+                        continue
+                    yield child
+
     findings = []
     detectors = [DETECTORS[p] for p in patterns]
 
-    for filepath in iter_python_files(paths):
+    for filepath in _iter_python_files():
         tree = parse_file(filepath)
         if tree is None:
             continue
@@ -1435,63 +1476,6 @@ def apply_fixes(findings: List[Finding]) -> Tuple[int, int]:
 # --suggest: emit unified diffs for human review
 # ---------------------------------------------------------------------------
 
-def emit_suggestions(findings: List[Finding]) -> str:
-    """Emit human-readable suggestions for findings that support --suggest."""
-    suggestable = [
-        f
-        for f in findings
-        if f.fix_action == "suggest" and f.subtype in SUGGESTABLE_SUBTYPES
-    ]
-
-    # Also include fixable findings as previews (show what --fix would do)
-    fixable = [
-        f
-        for f in findings
-        if f.fix_action == "delete-lines"
-        and f.fix_lines != (0, 0)
-        and f.subtype in FIXABLE_SUBTYPES
-    ]
-
-    if not suggestable and not fixable:
-        return "No suggestions to emit."
-
-    out: List[str] = []
-
-    if fixable:
-        out.append("=" * 70)
-        out.append("  Auto-fixable with --fix:")
-        out.append("=" * 70)
-        by_file: Dict[str, List[Finding]] = {}
-        for f in fixable:
-            by_file.setdefault(f.file, []).append(f)
-
-        for filepath, ffs in sorted(by_file.items()):
-            out.append(f"\n  {filepath}")
-            path = Path(filepath)
-            lines = _get_source_lines(path)
-            for f in sorted(ffs, key=lambda x: x.line):
-                start, end = f.fix_lines
-                out.append(f"    L{start}-{end}: DELETE  [{f.subtype}] {f.description}")
-                for ln in range(start, end + 1):
-                    if ln <= len(lines):
-                        out.append(f"      - {lines[ln - 1]}")
-
-    if suggestable:
-        out.append("")
-        out.append("=" * 70)
-        out.append("  Manual review needed:")
-        out.append("=" * 70)
-        for f in suggestable:
-            out.append(f"\n  {f.file}:{f.line}  [{f.subtype}]")
-            out.append(f"    {f.description}")
-            if f.fix_suggestion:
-                out.append(f"    Suggestion: {f.fix_suggestion}")
-            if f.code_snippet:
-                for line in f.code_snippet.splitlines()[:3]:
-                    out.append(f"    | {line}")
-
-    return "\n".join(out)
-
 def format_text(findings: List[Finding]) -> str:
     if not findings:
         return "No anti-patterns found."
@@ -1514,9 +1498,6 @@ def format_text(findings: List[Finding]) -> str:
 
     out.append(f"\n--- {len(findings)} finding(s) ---")
     return "\n".join(out)
-
-def format_json(findings: List[Finding]) -> str:
-    return json.dumps([asdict(f) for f in findings], indent=2)
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
@@ -1584,7 +1565,58 @@ def main(argv: Optional[List[str]] = None) -> int:
     findings = scan(args.paths, patterns, disabled=disabled)
 
     if args.suggest:
-        print(emit_suggestions(findings))
+        # --suggest: human-readable preview of what --fix would do plus
+        # manual-review items (single-use helpers, wrap-then-unwrap).
+        suggestable = [
+            f
+            for f in findings
+            if f.fix_action == "suggest"
+            and f.subtype in SUGGESTABLE_SUBTYPES
+        ]
+        fixable = [
+            f
+            for f in findings
+            if f.fix_action == "delete-lines"
+            and f.fix_lines != (0, 0)
+            and f.subtype in FIXABLE_SUBTYPES
+        ]
+        if not suggestable and not fixable:
+            print("No suggestions to emit.")
+        else:
+            out: List[str] = []
+            if fixable:
+                out.append("=" * 70)
+                out.append("  Auto-fixable with --fix:")
+                out.append("=" * 70)
+                by_file: Dict[str, List[Finding]] = {}
+                for f in fixable:
+                    by_file.setdefault(f.file, []).append(f)
+                for filepath, ffs in sorted(by_file.items()):
+                    out.append(f"\n  {filepath}")
+                    src_lines = _get_source_lines(Path(filepath))
+                    for f in sorted(ffs, key=lambda x: x.line):
+                        start, end = f.fix_lines
+                        out.append(
+                            f"    L{start}-{end}: DELETE  "
+                            f"[{f.subtype}] {f.description}"
+                        )
+                        for ln in range(start, end + 1):
+                            if ln <= len(src_lines):
+                                out.append(f"      - {src_lines[ln - 1]}")
+            if suggestable:
+                out.append("")
+                out.append("=" * 70)
+                out.append("  Manual review needed:")
+                out.append("=" * 70)
+                for f in suggestable:
+                    out.append(f"\n  {f.file}:{f.line}  [{f.subtype}]")
+                    out.append(f"    {f.description}")
+                    if f.fix_suggestion:
+                        out.append(f"    Suggestion: {f.fix_suggestion}")
+                    if f.code_snippet:
+                        for line in f.code_snippet.splitlines()[:3]:
+                            out.append(f"    | {line}")
+            print("\n".join(out))
         return 1 if findings else 0
 
     if args.fix:
@@ -1605,7 +1637,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0 if fixed else 1
 
     if args.json:
-        print(format_json(findings))
+        print(json.dumps([asdict(f) for f in findings], indent=2))
     else:
         print(format_text(findings))
 
