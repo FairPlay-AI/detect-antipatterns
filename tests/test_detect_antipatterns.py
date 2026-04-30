@@ -206,6 +206,69 @@ class TestDisableSuppression:
 
 
 # ---------------------------------------------------------------------------
+# DAP005 — single-use helper rule honors __all__
+# ---------------------------------------------------------------------------
+
+class TestSingleUseHelperHonorsAllDeclaration:
+    """A function declared in `__all__` is, by author intent, public API.
+    External callers (tests, downstream code, other modules in the same
+    package) use it. The "single-use in this file" heuristic produces
+    false positives for those cases — `__all__` is the explicit author
+    declaration that the rule should respect.
+    """
+
+    def test_helper_in_all_does_not_fire(self, tmp_path: Path) -> None:
+        src = (
+            "__all__ = ['exported']\n"
+            "def exported(x):\n"
+            "    if x < 0:\n"
+            "        return 0\n"
+            "    return x\n"
+            "def main(x):\n"
+            "    return exported(x)\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["single-use"])
+        assert not any(
+            f.subtype == "single-use-helper" and "exported" in f.description
+            for f in findings
+        )
+
+    def test_helper_NOT_in_all_still_fires(self, tmp_path: Path) -> None:
+        src = (
+            "__all__ = ['main']\n"
+            "def helper(x):\n"
+            "    if x < 0:\n"
+            "        return 0\n"
+            "    return x\n"
+            "def main(x):\n"
+            "    return helper(x)\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["single-use"])
+        assert any(
+            f.subtype == "single-use-helper" and "helper" in f.description
+            for f in findings
+        )
+
+    def test_no_all_declaration_unchanged(self, tmp_path: Path) -> None:
+        # Files without `__all__` keep the existing behavior — public
+        # single-use still fires.
+        src = (
+            "def helper(x):\n"
+            "    return x * 2\n"
+            "def main(x):\n"
+            "    return helper(x)\n"
+        )
+        path = _write(tmp_path, src)
+        findings = scan([str(path)], ["single-use"])
+        assert any(
+            f.subtype == "single-use-helper" and "helper" in f.description
+            for f in findings
+        )
+
+
+# ---------------------------------------------------------------------------
 # Epic 3: DAP002 log-then-swallow subtype
 # ---------------------------------------------------------------------------
 
