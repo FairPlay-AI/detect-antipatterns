@@ -142,7 +142,8 @@ def _func_body_no_docstring(node: ast.FunctionDef) -> List[ast.stmt]:
     if (
         body
         and isinstance(body[0], ast.Expr)
-        and isinstance(body[0].value, (ast.Constant, ast.Str))
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
     ):
         return body[1:]
     return body
